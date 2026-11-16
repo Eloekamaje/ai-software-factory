@@ -188,9 +188,24 @@ def source_workflows(source: Path) -> dict[str, Path]:
     return found
 
 
-def discover(settings: dict, source: Path) -> dict[str, Path]:
-    local = source_workflows(source)
-    data = native_json(settings, source, ["workflow", "list"], source)
+def project_workflows(root: Path) -> dict[str, Path]:
+    """Repo-local workflows Archon discovers at <cwd>/.archon/workflows."""
+    found: dict[str, Path] = {}
+    for path in (root / ".archon/workflows").rglob("*"):
+        if path.suffix not in (".yaml", ".yml"):
+            continue
+        match = re.search(r"^name:\s*['\"]?([a-z][a-z0-9-]*)['\"]?\s*$",
+                          path.read_text(encoding="utf-8"), re.M)
+        if match:
+            found[match[1]] = path
+    return found
+
+
+def discover(settings: dict, source: Path, root: Path) -> dict[str, Path]:
+    # Project workflows are a first-class Archon scope: the pinned source owns
+    # the shared SDLC pack, the repository owns its own entries.
+    local = {**source_workflows(source), **project_workflows(root)}
+    data = native_json(settings, source, ["workflow", "list"], root)
     if data.get("errors"):
         raise ValueError(f"Native workflow discovery errors: {data['errors']}")
     rows = data.get("workflows")
@@ -200,8 +215,8 @@ def discover(settings: dict, source: Path) -> dict[str, Path]:
     return {name: path for name, path in local.items() if name in names}
 
 
-def validate(settings: dict, source: Path, name: str) -> None:
-    data = native_json(settings, source, ["validate", "workflows", name], source)
+def validate(settings: dict, source: Path, name: str, root: Path) -> None:
+    data = native_json(settings, source, ["validate", "workflows", name], root)
     results = data.get("results", [])
     if (not results or any(row.get("valid") is not True for row in results)
             or data.get("summary", {}).get("errors", 0)):
@@ -260,12 +275,12 @@ def doctor(settings: dict, root: Path | None = None) -> dict:
         if f"workflow {command}" not in help_text or any(
                 flag not in help_text and flag not in shared_help for flag in flags):
             raise ValueError(f"Pinned CLI missing workflow {command} capability: {flags}")
-    discovered = discover(settings, source)
+    discovered = discover(settings, source, root)
     missing = sorted(set(MANIFEST["entries"]) - discovered.keys())
     if missing:
         raise ValueError("Incomplete integration source; missing shared workflows: " + ", ".join(missing))
     for name in discovered:
-        validate(settings, source, name)
+        validate(settings, source, name, root)
     return {"source": str(source), "revision": settings["revision"],
             "workflows": sorted(discovered), "automation": "supervised integration",
             **({"holdout_fence": fence_report(root)} if root is not None else {}),
@@ -371,7 +386,7 @@ def invoke(root: Path, action: str, args: list[str]) -> int:
         return 0
     if action == "list":
         print(json.dumps({"source": str(source), "revision": settings["revision"],
-                          "workflows": sorted(discover(settings, source))}, indent=2))
+                          "workflows": sorted(discover(settings, source, root))}, indent=2))
         return 0
     # These flags must precede caller arguments. Appending after a caller's `--`
     # turns them into message text and silently restores ambient source discovery.
@@ -380,13 +395,18 @@ def invoke(root: Path, action: str, args: list[str]) -> int:
         if not args:
             raise ValueError("Usage: factory run <shared-workflow> [native options and message]")
         name = args[0]
-        if name not in discover(settings, source):
-            raise ValueError(f"Shared workflow '{name}' is absent from the pinned SDLC source; no fallback")
-        validate(settings, source, name)
+        if name not in discover(settings, source, root):
+            raise ValueError(f"Workflow '{name}' is absent from the pinned source and this repository; no fallback")
+        validate(settings, source, name, root)
         options = args[:args.index("--")] if "--" in args else args
         resuming = any(arg.split("=", 1)[0] == "--resume" for arg in options)
         if not resuming:
-            native += ["--workflow-source", str(source)]
+            # A repository-owned workflow is only discovered from the live project
+            # scope; forcing the pinned source hides it. The CLI itself lives in the
+            # pinned source, so its default source is the same pin for the shared
+            # pack workflows and their includes.
+            if name in source_workflows(source):
+                native += ["--workflow-source", str(source)]
             args = with_default_inputs(name, args, options, root)
     native += args
     if action == "status":
@@ -450,7 +470,7 @@ def trigger_config(root: Path, settings: dict, source: Path, interval: int) -> d
         raise ValueError("A trigger cannot wrap the runtime host. Run it as its own service "
                          "(python factory/runtime_host.py serve --config <runtime.json> "
                          "--connection-file <connection.json>) and drop runtime_host from schedule.json")
-    if workflow not in discover(settings, source):
+    if workflow not in discover(settings, source, root):
         raise ValueError(f"Shared workflow '{workflow}' is absent from the pinned SDLC source")
     for key in inputs:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):

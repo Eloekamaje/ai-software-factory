@@ -161,6 +161,12 @@ python factory/consumer.py list
 Show any failures and what remains to configure. Doctor checks the installation
 and available workflows; it does not prove a live agent can sign in or complete a run.
 
+A repository can own workflows too: YAML under `.archon/workflows/`, commands
+next to it, scripts under `.archon/scripts/`. `doctor`, `list`, `run` and the
+scheduler see them beside the pinned shared pack, and a project workflow with the
+same name as a shared one overrides it. The pin keeps supplying the shared pack
+and its provenance checks.
+
 **5. Ask the one question that picks the path: existing codebase, or a PRD?**
 
 *Existing codebase.* The user files issues. Have them write holdouts for the area
